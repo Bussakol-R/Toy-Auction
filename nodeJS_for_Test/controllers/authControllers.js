@@ -483,7 +483,7 @@ const googleFlutterLogin = async (req, res) => {
           );
           redis.expire(email, 600);
 
-          const link = `${process.env.BASE_URL}api/v1/accounts/verify/email?email=${email}&ref=${refKey}&token=${activationToken}`;
+          const link = `${process.env.BASE_URL}/api/v1/accounts/verify/email?email=${email}&ref=${refKey}&token=${activationToken}`;
 
           sendEmail(email, "Verify Email For Healworld.me", link);
 
