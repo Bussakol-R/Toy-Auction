@@ -29,128 +29,131 @@ const addressSchema = require("../schemas/v1/address.schema");
 
 const register = async (req, res) => {
   if (!req.body) {
-    res
+    return res
       .status(400)
       .send({ status: "error", message: "Body can not be empty!" });
-    return;
   }
 
-  if (!req.body.name) {
-    res
+  const { name, phone, email, password, confirmPassword, userType, userData } = req.body;
+
+  if (!name) {
+    return res
       .status(400)
       .send({ status: "error", message: "Name can not be empty!" });
-    return;
   }
 
-  if (!req.body.email) {
-    res
+  if (!phone) {
+    return res
+      .status(400)
+      .send({ status: "error", message: "Phone number can not be empty!" });
+  }
+
+  if (!email) {
+    return res
       .status(400)
       .send({ status: "error", message: "Email can not be empty!" });
-    return;
   }
 
-  if (!req.body.password) {
-    res
+  if (!password) {
+    return res
       .status(400)
       .send({ status: "error", message: "Password can not be empty!" });
-    return;
+  }
+
+  if (!confirmPassword) {
+    return res
+      .status(400)
+      .send({ status: "error", message: "Confirm Password can not be empty!" });
+  }
+
+  if (password !== confirmPassword) {
+    return res.status(400).send({
+      status: "error",
+      message: "Passwords do not match!",
+    });
+  }
+
+  // ตรวจสอบว่าเบอร์โทรมี 10 หลักและเป็นของประเทศไทย
+  const phoneRegex = /^0[689]\d{8}$/; // รูปแบบเบอร์ไทย 10 หลักที่ขึ้นต้นด้วย 06, 08, 09
+  if (!phoneRegex.test(phone)) {
+    return res
+      .status(400)
+      .send({ status: "error", message: "Invalid phone number format!" });
   }
 
   const businessId = req.headers["businessid"];
   if (!businessId) {
-    res
+    return res
       .status(400)
       .send({ status: "error", message: "Business ID can not be empty!" });
-    return;
   }
 
   try {
     let findUser = await user.findOne({
-      "user.email": req.body.email,
+      "user.email": email,
       businessId: businessId,
     });
 
-    let rawPassword = req.body.password;
-    let hashedPassword = await bcrypt.hash(rawPassword, 10);
-
-    let generatedUserId = uuidv4();
-
-    let email = req.body.email;
-
-    let userType = req.body.userType ? req.body.userType : "regular";
-    let userData = req.body.userData ? req.body.userData : {};
-
-    if (!findUser) {
-      let userDataDocument;
-      let userTypeDataValue =
-        userType === "regular" ? "RegularUserData" : "OrganizationUserData";
-
-      if (userType === "regular") {
-        userDataDocument = new regularUserData(userData);
-      } else if (userType === "Organization") {
-        userDataDocument = new organizationUserData(userData);
-      }
-      await userDataDocument.save(); // บันทึก userData
-
-      new user({
-        user: {
-          name: req.body.name,
-          email: req.body.email,
-          password: hashedPassword,
-        },
-        userType: userType,
-        userData: userDataDocument._id,
-        userTypeData: userTypeDataValue,
-        businessId: businessId,
-      })
-        .save()
-        .then(async (user) => {
-          let activationToken = crypto.randomBytes(32).toString("hex");
-          let refKey = crypto.randomBytes(2).toString("hex").toUpperCase();
-
-          await redis.hSet(
-            email,
-            {
-              token: activationToken,
-              ref: refKey,
-            },
-            { EX: 600 }
-          );
-          await redis.expire(email, 600);
-
-          const link = `${process.env.BASE_URL}/api/v1/accounts/verify/email?email=${email}&ref=${refKey}&token=${activationToken}`;
-
-          await sendEmail(email, "Verify Email For Healworld.me", link);
-
-          res.status(201).send({
-            status: "success",
-            message: "Successfully Registered! Please confirm email address.",
-            data: {
-              ...user.toObject(),
-              userId: user._id,
-            },
-          });
-        })
-        .catch((err) =>
-          res.status(500).send({
-            status: "error",
-            message:
-              err.message || "Some error occurred while registering user.",
-          })
-        );
-    } else {
-      res.status(409).send({
+    if (findUser) {
+      return res.status(409).send({
         status: "error",
         message: "User already existed. Please Login instead",
       });
     }
+
+    let hashedPassword = await bcrypt.hash(password, 10);
+    let userDataDocument;
+    let userTypeDataValue = userType === "Organization" ? "OrganizationUserData" : "RegularUserData";
+
+    if (userType === "Organization") {
+      userDataDocument = new organizationUserData(userData);
+    } else {
+      userDataDocument = new regularUserData(userData);
+    }
+
+    await userDataDocument.save();
+
+    new user({
+      user: { name, email, phone, password: hashedPassword },
+      userType: userType || "regular",
+      userData: userDataDocument._id,
+      userTypeData: userTypeDataValue,
+      businessId: businessId,
+    })
+      .save()
+      .then(async (user) => {
+        let activationToken = crypto.randomBytes(32).toString("hex");
+        let refKey = crypto.randomBytes(2).toString("hex").toUpperCase();
+
+        await redis.hSet(
+          email,
+          { token: activationToken, ref: refKey },
+          { EX: 600 }
+        );
+
+        const link = `${process.env.BASE_URL}/api/v1/accounts/verify/email?email=${email}&ref=${refKey}&token=${activationToken}`;
+        await sendEmail(email, "Verify Email For Healworld.me", link);
+
+        return res.status(201).send({
+          status: "success",
+          message: "Successfully Registered! Please confirm email address.",
+          data: { ...user.toObject(), userId: user._id },
+        });
+      })
+      .catch((err) =>
+        res.status(500).send({
+          status: "error",
+          message: err.message || "Some error occurred while registering user.",
+        })
+      );
   } catch (err) {
     console.error(err);
-    res
+    return res
       .status(500)
       .send({ status: "error", message: "Internal server error." });
   }
 };
+
 
 const login = async (req, res, next) => {
   console.log("login function");
@@ -483,7 +486,7 @@ const googleFlutterLogin = async (req, res) => {
           );
           redis.expire(email, 600);
 
-          const link = `${process.env.BASE_URL}api/v1/accounts/verify/email?email=${email}&ref=${refKey}&token=${activationToken}`;
+          const link = `${process.env.BASE_URL}/api/v1/accounts/verify/email?email=${email}&ref=${refKey}&token=${activationToken}`;
 
           sendEmail(email, "Verify Email For Healworld.me", link);
 

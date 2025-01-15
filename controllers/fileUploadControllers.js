@@ -28,4 +28,3 @@ const deleteImageInBucket = async (req, res) => {
 module.exports = {
     fileUpload, queryObjectInBucket: deleteImageInBucket
 }
-

@@ -127,6 +127,15 @@ io.on("connection", (socket) => {
 
 //! V1 Endpoints
 //? Index Endpoints
+const v1AuctionRoutes = require("./routes/v1/auctionRoutes");
+app.use("/api/v1/auction", v1AuctionRoutes);
+
+const v1OrderRouter = require("./routes/v1/orderRoutes");
+app.use("/api/v1/order", v1OrderRouter);
+
+const v1ProductRouter = require("./routes/v1/productRoutes");
+app.use("/api/v1/products", v1ProductRouter);
+
 const v1IndexRouter = require("./routes/v1/indexRoutes");
 app.use("/api/v1", v1IndexRouter);
 
@@ -158,11 +167,8 @@ const activityRoutes = require("./routes/v1/activityRoutes");
 const v1ActivityRouter = activityRoutes(io);
 app.use("/api/v1/activity", v1ActivityRouter);
 
-const v1ProductsRouter = require("./routes/v1/ProductRoutes");
-app.use("/api/v1/Product", v1ProductsRouter);
-
-const v1OrdersRouter = require("./routes/v1/OrderRoutes");
-app.use("/api/v1/Order", v1OrdersRouter);
+const v1UserRouter = require("./routes/v1/UserRoutes");
+app.use("/api/v1/users", v1UserRouter);
 
 // catch 404 and forward to error handler
 app.use(function (req, res, next) {
