@@ -1,4 +1,5 @@
 require("dotenv").config();
+const stripe = require("stripe")("sk_test_51QrCtrP7PVqCIUzGNdOXSKHCBWRx73YiJgPXwasJDbQ58ZVFGDZCIEQEniy9IR5hcr26eTq5Ovm1Om2SLqWmN1UW00eDJq54sp");
 const createError = require("http-errors");
 const express = require("express");
 const path = require("path");
@@ -9,12 +10,16 @@ const cors = require("cors");
 const passport = require("passport");
 const sessions = require("express-session");
 const { RedisStore } = require("connect-redis");
+const paymentRoutes = require("./routes/v1/paymentRoutes");
 
-//? Databases 3
+//? Databases
 const connectMongoDB = require("./modules/database/mongodb");
 const redis = require("./modules/database/redis");
 
+// MongoDB Connection
 connectMongoDB();
+
+// Redis Connection
 (async () => {
   await redis.connect();
 })();
@@ -23,11 +28,10 @@ redis.on("connect", () => console.log(chalk.green("Redis Connected")));
 redis.on("ready", () => console.log(chalk.green("Redis Ready")));
 redis.on("error", (err) => console.log("Redis Client Error", err));
 
+// Export Redis
 module.exports = redis;
 
-//? Modules
-require("dotenv").config({ path: `.env.${process.env.NODE_ENV}` });
-
+//? Redis Store for Sessions
 let redisStore = new RedisStore({
   client: redis,
   prefix: "hdgtest:",
@@ -35,10 +39,11 @@ let redisStore = new RedisStore({
 
 const app = express();
 
-// view engine setup
+//? View Engine Setup
 app.set("views", path.join(__dirname, "views"));
 app.set("view engine", "ejs");
 
+//? Middleware
 app.use(logger("dev"));
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
@@ -50,42 +55,26 @@ app.set("trust proxy", false);
 app.use(
   sessions({
     secret: "secretkey",
-    store: redisStore, // กำหนด RedisStore
+    store: redisStore,
     saveUninitialized: false,
     resave: false,
     cookie: {
-      secure: false, // ใช้ true ถ้ารัน HTTPS
+      secure: false, // Set true if using HTTPS
       httpOnly: true,
-      maxAge: 1000 * 60 * 60 * 24, // อายุ session 1 วัน
+      maxAge: 1000 * 60 * 60 * 24, // 1 day
     },
   })
 );
-
-// sessions แบบไม่ store
-// app.use(
-//   sessions({
-//     secret: "secretkey",
-//     saveUninitialized: true,
-//     resave: false,
-//   })
-// );
 
 //? PassportJS
 app.use(passport.initialize());
 app.use(passport.session());
 
-// Cross Origin Resource Sharing
-const whitelist = [
-  "http://localhost:5173",
-];
+//? CORS Configuration
+const whitelist = ["http://localhost:5173"];
 const corsOptions = {
   origin: (origin, callback) => {
-    // allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) {
-      //console.log("Postman failed to pass origin");
-      return callback(null, true);
-    }
-
+    if (!origin) return callback(null, true); // Allow requests with no origin (Postman, curl, etc.)
     if (whitelist.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
@@ -95,21 +84,23 @@ const corsOptions = {
   methods: "GET,POST,PUT,PATCH,DELETE",
   optionsSuccessStatus: 200,
 };
-app.use(cors("*"));
-//app.use(cors(corsOptions));
+app.use(cors(corsOptions));
 
+//? Socket.io Setup
 const server = require("http").createServer(app);
 const io = require("socket.io")(server);
 
 io.on("connection", (socket) => {
-  console.log("a user connected:", socket.id);
+  console.log("A user connected:", socket.id);
 
   socket.on("joinActivity", (chatRoomId) => {
     socket.join(chatRoomId);
     console.log(`${socket.id} joined activity ${chatRoomId}`);
   });
 
-  socket.on("message", ({ activityId, message }) => {});
+  socket.on("message", ({ activityId, message }) => {
+    io.to(activityId).emit("message", { activityId, message });
+  });
 
   socket.on("leaveActivity", (chatRoomId) => {
     socket.leave(chatRoomId);
@@ -117,7 +108,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", () => {
-    console.log("user disconnected:", socket.id);
+    console.log("User disconnected:", socket.id);
   });
 
   socket.on("reaction", (data) => {
@@ -125,8 +116,7 @@ io.on("connection", (socket) => {
   });
 });
 
-//! V1 Endpoints
-//? Index Endpoints
+//? Routes
 const v1AuctionRoutes = require("./routes/v1/auctionRoutes");
 app.use("/api/v1/auction", v1AuctionRoutes);
 
@@ -139,30 +129,21 @@ app.use("/api/v1/products", v1ProductRouter);
 const v1IndexRouter = require("./routes/v1/indexRoutes");
 app.use("/api/v1", v1IndexRouter);
 
-const v1IndexRouter2 = require("./routes/v1/indexRoutes");
-app.use("/", v1IndexRouter2);
-
-//? Auth Endpoints
 const v1AuthRouter = require("./routes/v1/authRoutes");
 app.use("/api/v1/auth", v1AuthRouter);
 
-//? Chat Endpoints
 const v1ChatRouter = require("./routes/v1/chatRoutes")(io);
 app.use("/api/v1/chat", v1ChatRouter);
 
-//? Account Endpoints
 const v1AccountRouter = require("./routes/v1/accountsRoutes");
 app.use("/api/v1/accounts", v1AccountRouter);
 
-//? OSS Endpoints
 const v1FileUploadRouter = require("./routes/v1/fileUploadRoutes");
 app.use("/api/v1/fileupload", v1FileUploadRouter);
 
-//? Post Endpoint
 const v1PostRouter = require("./routes/v1/postRoutes");
 app.use("/api/v1/post", v1PostRouter);
 
-//? Post Endpoint
 const activityRoutes = require("./routes/v1/activityRoutes");
 const v1ActivityRouter = activityRoutes(io);
 app.use("/api/v1/activity", v1ActivityRouter);
@@ -170,20 +151,31 @@ app.use("/api/v1/activity", v1ActivityRouter);
 const v1UserRouter = require("./routes/v1/UserRoutes");
 app.use("/api/v1/users", v1UserRouter);
 
-// catch 404 and forward to error handler
-app.use(function (req, res, next) {
-  next(createError(404));
+
+//เพิ่มเส้นทาง paymentRoutes
+app.use(cors()); // ป้องกัน CORS error
+// ✅ Mount routes ถูกต้อง
+app.use("/api/v1/payments", paymentRoutes);
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+
+//? 404 Handler
+app.use((req, res, next) => {
+  res.status(404).json({
+    error: "Route not found",
+    message: `Cannot ${req.method} ${req.originalUrl}`,
+  });
 });
 
-// error handler
-app.use(function (err, req, res, next) {
-  // set locals, only providing error in development
-  res.locals.message = err.message;
-  res.locals.error = req.app.get("env") === "development" ? err : {};
-
-  // render the error page
-  res.status(err.status || 500);
-  res.render("error");
+//? Global Error Handler
+app.use((err, req, res, next) => {
+  res.status(err.status || 500).json({
+    error: err.message || "Internal Server Error",
+    details: req.app.get("env") === "development" ? err : {},
+  });
 });
 
+// Export App, Server, and Socket.io
 module.exports = { app, server, io };

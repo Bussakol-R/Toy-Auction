@@ -5,6 +5,7 @@ const { v4: uuidv4 } = require("uuid");
 const passport = require("passport");
 const bodyParser = require("body-parser");
 const { OAuth2Client } = require("google-auth-library");
+const Joi = require('joi');
 
 require("../middlewares/passport/passport-local");
 //require('../middlewares/passport/passport-jwt');
@@ -27,217 +28,221 @@ const organizationUserData = require("../schemas/v1/userData/organizationUserDat
 const contactInfoSchema = require("../schemas/v1/contact.schema");
 const addressSchema = require("../schemas/v1/address.schema");
 
+const MAX_DEVICES = 50;
+
 const register = async (req, res) => {
   if (!req.body) {
-    return res
+    res
       .status(400)
       .send({ status: "error", message: "Body can not be empty!" });
+    return;
   }
 
-  const { name, phone, email, password, confirmPassword, userType, userData } = req.body;
-
-  if (!name) {
-    return res
+  if (!req.body.name) {
+    res
       .status(400)
       .send({ status: "error", message: "Name can not be empty!" });
+    return;
   }
 
-  if (!phone) {
-    return res
-      .status(400)
-      .send({ status: "error", message: "Phone number can not be empty!" });
-  }
-
-  if (!email) {
-    return res
+  if (!req.body.email) {
+    res
       .status(400)
       .send({ status: "error", message: "Email can not be empty!" });
+    return;
   }
 
-  if (!password) {
-    return res
+  if (!req.body.password) {
+    res
       .status(400)
       .send({ status: "error", message: "Password can not be empty!" });
-  }
-
-  if (!confirmPassword) {
-    return res
-      .status(400)
-      .send({ status: "error", message: "Confirm Password can not be empty!" });
-  }
-
-  if (password !== confirmPassword) {
-    return res.status(400).send({
-      status: "error",
-      message: "Passwords do not match!",
-    });
-  }
-
-  // ตรวจสอบว่าเบอร์โทรมี 10 หลักและเป็นของประเทศไทย
-  const phoneRegex = /^0[689]\d{8}$/; // รูปแบบเบอร์ไทย 10 หลักที่ขึ้นต้นด้วย 06, 08, 09
-  if (!phoneRegex.test(phone)) {
-    return res
-      .status(400)
-      .send({ status: "error", message: "Invalid phone number format!" });
+    return;
   }
 
   const businessId = req.headers["businessid"];
   if (!businessId) {
-    return res
+    res
       .status(400)
       .send({ status: "error", message: "Business ID can not be empty!" });
+    return;
   }
 
   try {
     let findUser = await user.findOne({
-      "user.email": email,
+      "user.email": req.body.email,
       businessId: businessId,
     });
 
-    if (findUser) {
-      return res.status(409).send({
+    let rawPassword = req.body.password;
+    let hashedPassword = await bcrypt.hash(rawPassword, 10);
+
+    let generatedUserId = uuidv4();
+
+    let email = req.body.email;
+
+    let userType = req.body.userType ? req.body.userType : "regular";
+    let userData = req.body.userData ? req.body.userData : {};
+
+    if (!findUser) {
+      let userDataDocument;
+      let userTypeDataValue =
+        userType === "regular" ? "RegularUserData" : "OrganizationUserData";
+
+      if (userType === "regular") {
+        userDataDocument = new regularUserData(userData);
+      } else if (userType === "Organization") {
+        userDataDocument = new organizationUserData(userData);
+      }
+      await userDataDocument.save(); // บันทึก userData
+
+      new user({
+        user: {
+          name: req.body.name,
+          email: req.body.email,
+          password: hashedPassword,
+        },
+        userType: userType,
+        userData: userDataDocument._id,
+        userTypeData: userTypeDataValue,
+        businessId: businessId,
+      })
+        .save()
+        .then(async (user) => {
+          let activationToken = crypto.randomBytes(32).toString("hex");
+          let refKey = crypto.randomBytes(2).toString("hex").toUpperCase();
+
+          await redis.hSet(
+            email,
+            {
+              token: activationToken,
+              ref: refKey,
+            },
+            { EX: 600 }
+          );
+          await redis.expire(email, 600);
+
+          const link = `${process.env.BASE_URL}/api/v1/accounts/verify/email?email=${email}&ref=${refKey}&token=${activationToken}`;
+
+          await sendEmail(email, "Verify Email For Healworld.me", link);
+
+          res.status(201).send({
+            status: "success",
+            message: "Successfully Registered! Please confirm email address.",
+            data: {
+              ...user.toObject(),
+              userId: user._id,
+            },
+          });
+        })
+        .catch((err) =>
+          res.status(500).send({
+            status: "error",
+            message:
+              err.message || "Some error occurred while registering user.",
+          })
+        );
+    } else {
+      res.status(409).send({
         status: "error",
         message: "User already existed. Please Login instead",
       });
     }
-
-    let hashedPassword = await bcrypt.hash(password, 10);
-    let userDataDocument;
-    let userTypeDataValue = userType === "Organization" ? "OrganizationUserData" : "RegularUserData";
-
-    if (userType === "Organization") {
-      userDataDocument = new organizationUserData(userData);
-    } else {
-      userDataDocument = new regularUserData(userData);
-    }
-
-    await userDataDocument.save();
-
-    new user({
-      user: { name, email, phone, password: hashedPassword },
-      userType: userType || "regular",
-      userData: userDataDocument._id,
-      userTypeData: userTypeDataValue,
-      businessId: businessId,
-    })
-      .save()
-      .then(async (user) => {
-        let activationToken = crypto.randomBytes(32).toString("hex");
-        let refKey = crypto.randomBytes(2).toString("hex").toUpperCase();
-
-        await redis.hSet(
-          email,
-          { token: activationToken, ref: refKey },
-          { EX: 600 }
-        );
-
-        const link = `${process.env.BASE_URL}/api/v1/accounts/verify/email?email=${email}&ref=${refKey}&token=${activationToken}`;
-        await sendEmail(email, "Verify Email For Healworld.me", link);
-
-        return res.status(201).send({
-          status: "success",
-          message: "Successfully Registered! Please confirm email address.",
-          data: { ...user.toObject(), userId: user._id },
-        });
-      })
-      .catch((err) =>
-        res.status(500).send({
-          status: "error",
-          message: err.message || "Some error occurred while registering user.",
-        })
-      );
   } catch (err) {
     console.error(err);
-    return res
+    res
       .status(500)
       .send({ status: "error", message: "Internal server error." });
   }
 };
 
+// Schema สำหรับ validate headers
+const headerSchema = Joi.object({
+  "device-fingerprint": Joi.string().required().messages({
+    "any.required": "Device fingerprint is required!",
+    "string.base": "Device fingerprint must be a string!",
+  }),
+  businessid: Joi.string().required().messages({
+    "any.required": "Business ID is required!",
+    "string.base": "Business ID must be a string!",
+  }),
+}).unknown(true);
 
-const login = async (req, res, next) => {
-  console.log("login function");
+// Schema สำหรับ validate body
+const bodySchema = Joi.object({
+  email: Joi.string().email().required().messages({
+    "any.required": "Email is required!",
+    "string.email": "Invalid email format!",
+  }),
+  password: Joi.string().required().messages({
+    "any.required": "Password is required!",
+    "string.base": "Password must be a string!",
+  }),
+});
 
-  if (!req.headers["device-fingerprint"]) {
-    return res
-      .status(401)
-      .send({ status: "error", message: "Device fingerprint is required!" });
+// Middleware สำหรับ validate headers
+const validateHeaders = (req, res, next) => {
+  const { error } = headerSchema.validate(req.headers);
+  if (error) {
+    return res.status(400).send({ status: "error", message: error.message });
   }
+  next();
+};
 
-  const deviceFingerprint = req.headers["device-fingerprint"];
-  const businessId = req.headers["businessid"];
-
-  if (!businessId) {
-    return res
-      .status(400)
-      .send({ status: "error", message: "Business ID is required!" });
+// Middleware สำหรับ validate body
+const validateBody = (req, res, next) => {
+  const { error } = bodySchema.validate(req.body);
+  if (error) {
+    return res.status(400).send({ status: "error", message: error.message });
   }
+  next();
+};
 
-  passport.authenticate(
-    "local",
-    { session: false },
-    async (err, foundUser, info) => {
-      console.log(`login : ${foundUser}`);
-      if (err) return next(err);
+const generateToken = (payload, secret, expiresIn) =>
+  jwt.sign(payload, secret, { expiresIn });
 
-      if (foundUser) {
+const login = [
+  validateHeaders,
+  validateBody,
+  async (req, res, next) => {
+    try {
+      console.log("login function");
+
+      const deviceFingerprint = req.headers["device-fingerprint"];
+      const businessId = req.headers["businessid"];
+      const { email, password } = req.body;
+
+      passport.authenticate("local", { session: false }, async (err, foundUser, info) => {
+        if (err) return next(err);
+
+        if (!foundUser) {
+          return res
+            .status(info.statusCode || 401)
+            .send({ status: "error", message: info.message });
+        }
+
         console.log("login : found user");
 
         const loggedInDevices = foundUser.loggedInDevices || [];
-        if (loggedInDevices.length >= 50) {
+        if (loggedInDevices.length >= MAX_DEVICES) {
           return res
             .status(403)
             .send({ status: "error", message: "Login limit exceeded." });
         }
 
-        const foundUserEmail = foundUser.user.email;
-        const foundUserId = foundUser.userId;
+        const { name, phone, activated, verified, imageURL } = foundUser.user;
+        const { _id: userId } = foundUser;
 
-        const accessToken = jwt.sign(
-          {
-            userId: foundUserId,
-            name: foundUser.user.name,
-            email: foundUserEmail,
-            businessId: businessId,
-          },
+        // Generate Tokens
+        const accessToken = generateToken(
+          { userId, name, email, businessId },
           process.env.JWT_ACCESS_TOKEN_SECRET,
-          { expiresIn: process.env.ACCESS_TOKEN_EXPIRES }
+          process.env.ACCESS_TOKEN_EXPIRES
         );
-        const refreshToken = jwt.sign(
-          {
-            userId: foundUserId,
-            name: foundUser.user.name,
-            email: foundUserEmail,
-            businessId: businessId,
-          },
+
+        const refreshToken = generateToken(
+          { userId, name, email, businessId },
           process.env.JWT_REFRESH_TOKEN_SECRET,
-          { expiresIn: process.env.REFRESH_TOKEN_EXPIRES }
-        );
-        await redis.sAdd(
-          `Device_Fingerprint_${foundUserId}`,
-          deviceFingerprint
-        );
-
-        redis.set(`Last_Login_${foundUserId}_${deviceFingerprint}`, Date.now());
-
-        let length = 6,
-          charset = "0123456789",
-          refreshTokenOTP = "";
-        for (let i = 0, n = charset.length; i < length; ++i) {
-          refreshTokenOTP += charset.charAt(Math.floor(Math.random() * n));
-        }
-
-        redis.set(
-          `Last_Refresh_Token_OTP_${foundUserId}_${deviceFingerprint}`,
-          refreshTokenOTP
-        );
-        redis.set(
-          `Last_Refresh_Token_${foundUserId}_${deviceFingerprint}`,
-          refreshToken
-        );
-        redis.set(
-          `Last_Access_Token_${foundUserId}_${deviceFingerprint}`,
-          accessToken
+          process.env.REFRESH_TOKEN_EXPIRES
         );
 
         const deviceIndex = loggedInDevices.findIndex(
@@ -246,11 +251,11 @@ const login = async (req, res, next) => {
 
         if (deviceIndex === -1) {
           await User.updateOne(
-            { _id: foundUser._id },
+            { _id: userId },
             {
               $push: {
                 loggedInDevices: {
-                  deviceFingerprint: deviceFingerprint,
+                  deviceFingerprint,
                   lastLogin: Date.now(),
                 },
               },
@@ -259,97 +264,142 @@ const login = async (req, res, next) => {
         } else {
           loggedInDevices[deviceIndex].lastLogin = Date.now();
           await User.updateOne(
-            { _id: foundUser._id },
-            { $set: { loggedInDevices: loggedInDevices } }
+            { _id: userId },
+            { $set: { loggedInDevices } }
           );
         }
 
+        res.cookie("accessToken", accessToken, {
+          httpOnly: true,
+          secure: true,
+          sameSite: "strict",
+          maxAge: parseInt(process.env.ACCESS_TOKEN_EXPIRES, 10) * 1000, // แปลงวินาทีเป็นมิลลิวินาที
+        });
+        
+        res.cookie("refreshToken", refreshToken, {
+          httpOnly: true,
+          secure: true,
+          sameSite: "strict",
+          maxAge: parseInt(process.env.REFRESH_TOKEN_EXPIRES, 10) * 1000, // แปลงวินาทีเป็นมิลลิวินาที
+        });
+        
         res.status(200).send({
           status: "success",
           message: "Successfully Login",
           data: {
-            userId: foundUser._id,
-            user: {
-              name: foundUser.user.name,
-              email: foundUserEmail,
-              phone: foundUser.user.phone,
-              activated: foundUser.user.activated,
-              verified: {
-                email: foundUser.user.verified.email,
-                phone: foundUser.user.verified.phone,
-              },
-            },
-            imageURL: foundUser.user.imageURL,
-            tokens: {
-              accessToken: accessToken,
-              refreshToken: refreshToken,
-              refreshTokenOTP: refreshTokenOTP,
-            },
+            userId,
+            user: { name, email, phone, activated, verified },
+            imageURL,
           },
         });
-      } else {
-        console.log("login error");
-        return res
-          .status(info.statusCode)
-          .send({ status: "error", message: info.message });
-      }
+      })(req, res, next);
+    } catch (error) {
+      console.error("Login Error:", error);
+      next(error);
     }
-  )(req, res, next);
-};
+  },
+];
 
 const logout = async (req, res, next) => {
-  console.log("logout function");
-
-  if (!req.headers["device-fingerprint"]) {
-    return res
-      .status(401)
-      .send({ status: "error", message: "Device fingerprint is required!" });
-  }
-
-  const deviceFingerprint = req.headers["device-fingerprint"];
-  const businessId = req.headers["businessid"];
-
-  if (!businessId) {
-    return res
-      .status(400)
-      .send({ status: "error", message: "Business ID is required!" });
-  }
-
-  const userId = req.user.userId; // assuming req.user contains authenticated user data
+  console.log("Logout function triggered");
 
   try {
-    // Find user by userId
-    const foundUser = await User.findById(userId);
-
-    if (!foundUser) {
-      return res
-        .status(404)
-        .send({ status: "error", message: "User not found" });
+    // ดึง Refresh Token จาก Secure Cookie
+    const refreshToken = req.cookies?.refreshToken;
+    if (!refreshToken) {
+      return res.status(401).send({
+        status: "error",
+        message: "Refresh token is required!",
+      });
     }
 
-    // Remove device from loggedInDevices
+    let decoded;
+    try {
+      decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_TOKEN_SECRET);
+    } catch (err) {
+      console.error("JWT Verification Error:", err);
+      return res.status(401).send({
+        status: "error",
+        message:
+          err.name === "TokenExpiredError"
+            ? "Refresh token has expired!"
+            : "Invalid refresh token!",
+      });
+    }
+
+    const userId = decoded?.userId;
+    const deviceFingerprint = req.headers["device-fingerprint"];
+    const businessId = req.headers["businessid"];
+
+    if (!deviceFingerprint) {
+      return res.status(400).send({
+        status: "error",
+        message: "Device fingerprint is required!",
+      });
+    }
+    if (!businessId) {
+      return res.status(400).send({
+        status: "error",
+        message: "Business ID is required!",
+      });
+    }
+    if (!userId) {
+      return res.status(401).send({
+        status: "error",
+        message: "Unauthorized user!",
+      });
+    }
+
+    // ค้นหา User
+    const foundUser = await User.findById(userId);
+    if (!foundUser) {
+      return res.status(404).send({
+        status: "error",
+        message: "User not found!",
+      });
+    }
+
     const updatedDevices = foundUser.loggedInDevices.filter(
-      (device) => device.deviceFingerprint !== deviceFingerprint
+      (device) =>
+        device.deviceFingerprint !== deviceFingerprint ||
+        device.businessId !== businessId
     );
 
-    // Update user with filtered devices
+    // อัปเดต loggedInDevices ในฐานข้อมูล
     await User.updateOne(
-      { _id: foundUser._id },
+      { _id: userId },
       { $set: { loggedInDevices: updatedDevices } }
     );
 
-    // Remove related data from Redis
-    await redis.sRem(`Device_Fingerprint_${userId}`, deviceFingerprint);
-    await redis.del(`Last_Login_${userId}_${deviceFingerprint}`);
-    await redis.del(`Last_Refresh_Token_OTP_${userId}_${deviceFingerprint}`);
-    await redis.del(`Last_Refresh_Token_${userId}_${deviceFingerprint}`);
-    await redis.del(`Last_Access_Token_${userId}_${deviceFingerprint}`);
+    const redisKeys = [
+      `Device_Fingerprint_${userId}`,
+      `Last_Login_${userId}_${deviceFingerprint}`,
+      `Last_Refresh_Token_OTP_${userId}_${deviceFingerprint}`,
+      `Last_Refresh_Token_${userId}_${deviceFingerprint}`,
+      `Last_Access_Token_${userId}_${deviceFingerprint}`,
+    ];
+
+    const redisPromises = redisKeys.map((key) => redis.del(key));
+    await Promise.all(redisPromises);
+
+    // ลบ Secure Cookies
+    res.clearCookie("accessToken", {
+      httpOnly: true,
+      secure: true,
+      sameSite: "strict",
+    });
+    res.clearCookie("refreshToken", {
+      httpOnly: true,
+      secure: true,
+      sameSite: "strict",
+    });
 
     res.status(200).send({
       status: "success",
-      message: "Successfully Logged Out",
+      message: "Successfully logged out.",
     });
   } catch (err) {
+    console.error("Logout Error:", err);
     next(err);
   }
 };

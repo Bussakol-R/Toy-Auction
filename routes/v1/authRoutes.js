@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const passport = require("passport");
+const jwt = require('jsonwebtoken');
 
 const {
   registerRateLimiter,
@@ -28,6 +29,11 @@ router.post("/register", registerRateLimiter, register);
 
 //? Login
 router.post("/login", loginRateLimiter, login);
+
+router.post('/login', async (req, res) => {
+  const token = jwt.sign({ userId: '12345' }, 'secret_key', { expiresIn: '1h' });
+  res.json({ token });
+});
 
 //? Logout
 router.post("/logout", loginRateLimiter, logout);
