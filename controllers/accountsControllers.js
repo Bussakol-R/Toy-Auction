@@ -1,3 +1,4 @@
+require("dotenv").config();
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
@@ -9,93 +10,139 @@ const redis = require("../app");
 
 const sendVerifyEmail = require("../modules/email/sendVerifyEmail");
 const sendResetPasswordEmail = require("../modules/email/sendResetPasswordEmail");
+const sendPasswordChangeEmail = require("../modules/email/sendPasswordChangeEmail"); // ✅ นำเข้า emailService
+
 
 const user = require("../schemas/v1/user.schema");
+const User = require("../schemas/v1/user.schema");
+const Profile = require("../schemas/v1/profile.schema"); // ✅ Import Profile
 
 const changePassword = async (req, res) => {
-  if (!req.body) {
-    res.status(400).send({ status: "error", message: "Content can not be empty!" });
-    return;
-  }
+  try {
+    const { oldPassword, newPassword } = req.body;
 
-  if (!req.body.password) {
-    return res.status(400).send({ status: "error", message: "Password can not be empty!" });
-  }
+    if (!req.user || !req.user.userId) {
+      return res.status(401).json({ status: "error", message: "Unauthorized: User ID not found" });
+    }
 
-  if (req.body.password.length < 8) {
-    return res.status(400).send({ status: "error", message: "Password needs to be more than 8 characters!" });
-  }
+    const userId = req.user.userId;
+    const userData = await User.findById(userId).select("+user.password user.email user.name");
 
-  const userId = req.params.user;
-  const rawPassword = req.body.password;
-  const hashedPassword = await bcrypt.hash(rawPassword, 10);
+    console.log("🔍 DEBUG userData:", userData);
+    if (!userData) {
+      return res.status(404).json({ status: "error", message: "User not found." });
+    }
 
-  await user
-    .findOneAndUpdate(
-      { "user.email": userId },
-      { "user.password": hashedPassword },
-      { useFindAndModify: false, new: true }
-    )
-    .then(async (data) => {
-      if (!data) {
-        await res.status(404).send({
-          status: "error",
-          message: `Cannot update user ${userId}, maybe the user was not found.`,
-        });
-      } else {
-        let checkResetPassword = await redis.get(`${userId}-resetPassword`);
+    if (!userData.user || !userData.user.password) {
+      return res.status(500).json({ status: "error", message: "User password not found in database." });
+    }
 
-        if (checkResetPassword) {
-          await redis.del(`${userId}-resetPassword`);
-        }
+    if (oldPassword) {
+      console.log("🔍 DEBUG oldPassword:", oldPassword);
 
-        await res
-          .status(200)
-          .send({
-            authenticated_user: req.user,
-            status: "success",
-            message: `User ${userId} password has been updated`,
-          });
+      if (typeof oldPassword !== "string" || typeof userData.user.password !== "string") {
+        return res.status(400).json({ status: "error", message: "Invalid password format." });
       }
-    })
-    .catch((err) => {
-      res.status(500).send({ status: "error", message: `Error updating user ${userId}. Error: ${err}` });
-    });
+
+      const isMatch = await bcrypt.compare(oldPassword, userData.user.password);
+      console.log("🔍 DEBUG isMatch:", isMatch);
+
+      if (!isMatch) {
+        return res.status(400).json({ status: "error", message: "Old password is incorrect." });
+      }
+    } else {
+      console.log("⚠️ Warning: No oldPassword provided, skipping verification.");
+    }
+
+    if (newPassword.length < 8) {
+      return res.status(400).json({ status: "error", message: "New password must be at least 8 characters long." });
+    }
+
+    const passwordStrengthRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
+    if (!passwordStrengthRegex.test(newPassword)) {
+      return res.status(400).json({
+        status: "error",
+        message: "New password must include at least one uppercase letter, one lowercase letter, one number, and one special character.",
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    userData.user.password = hashedPassword;
+    await userData.save();
+
+    await sendPasswordChangeEmail(userData.user.email, userData.user.name);
+
+    return res.status(200).json({ status: "success", message: "Password has been successfully updated." });
+
+  } catch (err) {
+    console.error("❌ ERROR in changePassword:", err);
+    return res.status(500).json({ status: "error", message: err.message || "An error occurred while updating the password." });
+  }
+};
+
+const forgotPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).send({ status: "error", message: "Email is required" });
+    }
+
+    const findUser = await user.findOne({ "user.email": email });
+    if (!findUser) {
+      return res.status(404).send({ status: "error", message: "User not found" });
+    }
+
+    const resetToken = jwt.sign({ email }, process.env.JWT_SECRET, { expiresIn: "15m" });
+
+    await redis.set(`${email}-resetPassword`, resetToken, "EX", 900);
+
+    // ✅ แก้ให้ใช้ resetToken ตรงๆ
+    const resetLink = `http://localhost:3000/resetpassword?token=${resetToken}`;
+
+    await sendResetPasswordEmail(email, "Reset Your Password", resetToken); // ✅ ส่ง Token ไม่ใช่ URL ซ้ำซ้อน
+
+    return res.status(200).send({ status: "success", message: "Reset password link sent to email." });
+  } catch (err) {
+    console.error("Forgot Password Error:", err);
+    return res.status(500).send({ status: "error", message: "Internal Server Error" });
+  }
 };
 
 const resetPassword = async (req, res) => {
-  //return res.status(200).send({ status: 'success', message: 'New password has been sent to your email address.'});
-  let email = req.params.email;
-
   try {
-    let findUser = await user.findOne({ "user.email": email });
+    const { newPassword, token } = req.body; // ✅ รับ Token จาก Body แทน Cookie
 
-    if (findUser) {
-      let length = 8,
-        charset = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz",
-        password = "";
-      for (let i = 0, n = charset.length; i < length; ++i) {
-        password += charset.charAt(Math.floor(Math.random() * n));
-      }
-
-      const newTempPassword = password;
-      let hashedPassword = await bcrypt.hash(newTempPassword, 10);
-
-      await sendResetPasswordEmail(email, "Request To Change Password For Healworld.me", newTempPassword);
-      await user.updateOne({ "user.email": email }, { "user.password": hashedPassword });
-      redis.set(`${email}-resetPassword`, "true");
-
-      await res.status(200).send({ status: "success", message: "New password has been sent to your email address." });
-    } else {
-      await res
-        .status(404)
-        .send({
-          status: "error",
-          message: "User with that email does not exist. Please make sure the email is correct.",
-        });
+    if (!token || !newPassword) {
+      return res.status(400).send({ status: "error", message: "Token and new password are required" });
     }
+
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET);
+    } catch (err) {
+      return res.status(400).send({ status: "error", message: "Invalid or expired token" });
+    }
+
+    const email = decoded.email;
+    const storedToken = await redis.get(`${email}-resetPassword`);
+
+    if (!storedToken || storedToken !== token) {
+      return res.status(400).send({ status: "error", message: "Invalid or expired token" });
+    }
+
+    if (newPassword.length < 8) {
+      return res.status(400).send({ status: "error", message: "Password must be at least 8 characters long." });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    await user.updateOne({ "user.email": email }, { "user.password": hashedPassword });
+
+    await redis.del(`${email}-resetPassword`);
+
+    return res.status(200).send({ status: "success", message: "Password reset successfully" });
   } catch (err) {
-    console.error(err);
+    console.error("Reset Password Error:", err);
+    return res.status(500).send({ status: "error", message: "Internal Server Error" });
   }
 };
 
@@ -121,7 +168,7 @@ const sendEmailVerification = async (req, res) => {
 
       const link = `${process.env.BASE_URL}/api/v1/accounts/verify/email?email=${email}&ref=${refKey}&token=${activationToken}`;
 
-      await sendVerifyEmail(email, "Verify Email For Healworld.me", link);
+      await sendVerifyEmail(email, "Verify Email For Acutions", link);
 
       const accessToken = req.headers["authorization"].replace("Bearer ", "");
 
@@ -218,50 +265,93 @@ const sendPhoneVerification = async (req, res) => {
 };
 
 const verifyEmail = async (req, res) => {
-  let email = req.query.email;
-  let ref = req.query.ref;
-  let token = req.query.token;
+  const email = req.query.email;
+  const ref = req.query.ref;
+  const token = req.query.token;
 
   if (!email) {
-    return res.status(400).send({ status: "error", message: "Email can not be empty!" });
+    return res.status(400).send({ status: "error", message: "Email cannot be empty!" });
   }
 
   if (!ref) {
-    return res.status(400).send({ status: "error", message: "Ref Code can not be empty!" });
+    return res.status(400).send({ status: "error", message: "Ref Code cannot be empty!" });
   }
 
   if (!token) {
-    return res.status(400).send({ status: "error", message: "Pin Code can not be empty!" });
+    return res.status(400).send({ status: "error", message: "Token cannot be empty!" });
   }
 
   try {
     console.log("------> user.email = ", email);
-    let findUser = await user.findOne({ "user.email": email });
+
+    // Find the user by email
+    const findUser = await user.findOne({ "user.email": email });
 
     if (!findUser) {
       return res.status(404).send({ status: "error", message: "Code is invalid or expired." });
     }
 
-    //let activationToken = await redis.get(email);
-    let activationToken = await redis.hGetAll(email);
+    // Retrieve activation token from Redis
+    const activationToken = await redis.hGetAll(email);
 
-    if (token !== activationToken.token && ref !== activationToken.ref) {
+    // Verify token and ref
+    if (token !== activationToken.token || ref !== activationToken.ref) {
       return res.status(404).send({ status: "error", message: "Code is invalid or expired." });
-    } else {
-      await user.updateOne(
-        { "user.email": email },
-        { "user.activated": true, "user.verified.email": true, "user.verified.phone": true }
-      );
-      await redis.del(email);
-
-      //res.status(200).send({ message: 'E-mail has been successfully verified!'});
-      res.redirect("https://www.jaidee-dev.shop/emailverified");
     }
+
+    // Update user verification status
+    await user.updateOne(
+      { "user.email": email },
+      {
+        "user.activated": true,
+        "user.verified.email": true,
+        "user.verified.phone": true,
+      }
+    );
+
+    // Remove token from Redis
+    await redis.del(email);
+
+    // Display intermediate page before redirecting to YouTube
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Email Verified</title>
+        <style>
+          body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            padding: 50px;
+          }
+          h1 {
+            color: #4CAF50;
+          }
+          p {
+            font-size: 18px;
+            color: #555;
+          }
+        </style>
+      </head>
+      <body>
+        <h1>การยืนยันอีเมลสำเร็จ!</h1>
+        <p>กรุณารอสักครู่ เรากำลังพาคุณไปยังหน้าถัดไป...</p>
+        <script>
+          setTimeout(() => {
+            window.location.href = "http://localhost:3000/login";
+          }, 5000); // 5 วินาที
+        </script>
+      </body>
+      </html>
+    `);
   } catch (err) {
-    console.error(err);
-    res
-      .status(500)
-      .send({ status: "error", message: err.message || "Some error occurred while trying to verify email." });
+    console.error("Error during email verification:", err);
+    res.status(500).send({
+      status: "error",
+      message: err.message || "Some error occurred while trying to verify email.",
+    });
   }
 };
 
@@ -774,6 +864,7 @@ const updateBusinessesByUserId = async (req, res) => {
 module.exports = {
   changePassword,
   resetPassword,
+  forgotPassword,
   sendEmailVerification,
   sendPhoneVerification,
   verifyEmail,
